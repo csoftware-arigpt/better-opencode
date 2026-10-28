@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# websearch - curl-based search backend for the station.
+# Backends: Brave Search (default), DuckDuckGo Lite (fallback, with retries).
+# Replacement for the built-in websearch tool when its backend returns empty.
+# usage: websearch "query" [count] [brave|ddg]
+set -euo pipefail
+Q="${1:-}"; N="${2:-8}"; BE="${3:-auto}"
+[ -z "$Q" ] && { echo "usage: websearch <query> [count] [brave|ddg]" >&2; exit 2; }
+UA="Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+EQ=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$Q")
+
+brave() {
+  curl -s -m 20 -A "$UA" "https://search.brave.com/search?q=$EQ" | python3 -c "
+import sys, re, html
+n = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+t = sys.stdin.read()
+m = re.findall(r'<a href=\"(https?://[^\"]+)\"[^>]*>(.*?)</a>', t, re.S)
+out, seen = [], set()
+for u, ti in m:
+    if 'brave.com' in u or 'imgs.search' in u or 'l.brave' in u: continue
+    if u in seen: continue
+    seen.add(u)
+    ti = re.sub('<[^>]+>', '', ti).strip()
+    ti = html.unescape(ti)
+    out.append((u, ti))
+    if len(out) >= n: break
+if not out:
+    print('(no results)'); sys.exit(1)
+for i, (u, ti) in enumerate(out, 1):
+    print(f'{i}. {ti}')
+    print(f'   {u}')
+" "$N"
+}
+
+ddg() {
+  for i in 1 2 3; do
+    R=$(curl -s -m 20 -A "$UA" "https://lite.duckduckgo.com/lite/?q=$EQ" | python3 -c "
+import sys, re, urllib.parse, html
+n = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+t = sys.stdin.read()
+links = re.findall(r'uddg=([^&\"<>]+)[^>]*class=.result-link.[^>]*>(.*?)</a>', t)
+snips = re.findall(r'class=\"result-snippet\"[^>]*>(.*?)</td>', t, re.S)
+for u, ti in links[:n]:
+    url = urllib.parse.unquote(html.unescape(u))
+    title = re.sub('<[^>]+>', '', html.unescape(ti)).strip()
+    sn = re.sub('<[^>]+>', '', html.unescape(snips[i])).strip() if False else ''
+    print(f'{url}')
+    print(f'{title}')
+" "$N")
+    if [ -n "$R" ]; then
+      echo "$R" | python3 -c "
+import sys, subprocess, urllib.parse, html, re
+lines = sys.stdin.read().strip().split('\n')
+pairs = [lines[j:j+2] for j in range(0, len(lines), 2)]
+for i, (u, ti) in enumerate(pairs, 1):
+    print(f'{i}. {ti}')
+    print(f'   {u}')
+"
+      return 0
+    fi
+    sleep 4
+  done
+  echo "(no results)" >&2; return 1
+}
+
+case "$BE" in
+  brave) brave ;;
+  ddg)   ddg ;;
+  *)
+    if brave; then exit 0; fi
+    sleep 5
+    ddg
+    ;;
+esac

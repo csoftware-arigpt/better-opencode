@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# page-extract - fetch a page via curl and convert it to readable Markdown.
+# Pair of `websearch`: search -> open the top hits -> mine full Markdown.
+# usage: page-extract <url> [maxchars] [start-marker]
+#   maxchars     - output cap (default 12000)
+#   start-marker - optional substring; output starts at its first occurrence
+#                  (use "README", "About", or the article title on heavy sites)
+# Converts: h1-h6 -> #, links -> [text](href), lists -> bullets,
+# pre -> ``` blocks, blockquote -> >, hr -> ---. stdlib only.
+set -euo pipefail
+URL="${1:-}"; MAX="${2:-12000}"; MARK="${3:-}"
+[ -z "$URL" ] && { echo "usage: page-extract <url> [maxchars] [start-marker]" >&2; exit 2; }
+UA="Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+HERE=$(cd "$(dirname "$0")" && pwd)
+curl -sL -m 30 -A "$UA" "$URL" | python3 "$HERE/page_md.py" "$MAX" "$MARK" "$URL"

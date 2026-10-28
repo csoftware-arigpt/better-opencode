@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/glm-5.3-flash-free",
+  "small_model": "opencode/deepseek-v4.1-flash-free",
+  "plugins": [
+    "oh-my-opencode"
+  ],
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ],
+  "watcher": {
+    "ignore": [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/.omo/**",
+      "**/.npm/**",
+      "**/.cache/**",
+      "**/.local/**"
+    ]
+  },
+  "agents": {
+    "title": {
+      "model": "opencode/deepseek-v4.1-flash-free"
+    }
+  },
+  "mcp": {
+    "servers": {}
+  }
+}

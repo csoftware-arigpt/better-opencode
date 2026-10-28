@@ -1,0 +1,10 @@
+# Rust build artifacts (any depth: covers vendor/opencode-memory-rag/rust/target)
+target/
+node_modules/
+__pycache__/
+.venv/
+
+# Installer state lives OUTSIDE the repo (~/.local/state/better-opencode) by design,
+# but guard against local test runs creating it here
+backup-*.tgz
+manifest.txt
