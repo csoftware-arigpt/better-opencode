@@ -1,35 +1,42 @@
 # opencode-memory-rag
 
-Граф-RAG память проектов для OpenCode на телефоне (Termux).
+Graph-RAG project memory for OpenCode: per-project SQLite (FTS5/BM25) plus a typed knowledge graph, with reinforcement weighting that favors what the agent actually uses.
 
-- **Движок**: **Rust** (`rust/`, rusqlite bundled SQLite 3.46 + FTS5/BM25, CLI `memrag`) — бинарь заменяет node-CLI; `cli.mjs` остаётся node-fallback (`memrag-node`) и движком плагина.
-- **Граф**: узлы `note|file|tag|symbol` + типизированные симметричные рёбра (mentions/tagged/depends_on/…), BFS-расширение от сидов BM25, reinforcement весов («мозги» укрепляют то, что использует агент).
-- **Автопамять**: плагин OpenCode индексирует проект при создании сессии, пишет авто-ноту «что трогала сессия» при простое, инжектит состояние памяти при компакции контекста.
+- **Engine**: Rust (`rust/`, rusqlite with bundled SQLite 3.46 + FTS5/BM25, CLI `memrag`). `cli.mjs` remains the node fallback (`memrag-node`).
+- **Graph**: nodes `note | file | tag | symbol` + typed symmetric edges (`mentions`/`tagged`/`depends_on`/...), BFS expansion from BM25 seeds, reinforcement weights ("brains" strengthen nodes the agent touches).
+- **Auto memory**: the OpenCode plugin indexes the project at session creation, writes an idle auto-note ("what the session touched"), and injects memory state during context compaction.
 
-## Установка
+## Install
+
 ```sh
-~/projects/opencode-memory-rag/install.sh
+cargo build --release --manifest-path rust/Cargo.toml
+ln -s "$PWD/rust/target/release/memrag" ~/.local/bin/memrag
+bash install.sh   # wires the OpenCode plugin (tools: memory_query, memory_save, memory_index, memory_brain)
 ```
-Плагин подхватится при следующем запуске OpenCode (tools: `memory_query`, `memory_save`, `memory_index`, `memory_brain`). После правки `core.mjs` в проекте — перезапусти `install.sh` и OpenCode.
+
+Linking needs a C compiler for the bundled SQLite; on NixOS run the build inside `nix-shell -p gcc cargo`. The plugin picks up on the next OpenCode start; after editing `core.mjs`, rerun `install.sh` and restart OpenCode.
 
 ## CLI
+
 ```sh
-memrag index [--force]      # индексировать cwd (инкрементально)
-memrag query "..." [-k 8] [--depth 2]  # поиск + граф-контекст
-memrag note "Title::текст" [--tags a,b]  # сохранить ноту (+связи графа)
+memrag index [--force]                    # index cwd (incremental, mtime-based)
+memrag query "..." [-k 8] [--depth 2]     # BM25 search + graph context
+memrag note "Title::body" [--tags a,b]    # save a note (+graph links)
 memrag notes | pin | forget | read <id>
 memrag link <src> <dst> [type]
 memrag graph | brain | stats
 ```
 
-## Где данные
-`~/.local/share/opencode-memory-rag/<проект>.db` (per-проект). `MEMRAG_HOME`, `MEMRAG_DIR` — переопределение.
+## Where the data lives
 
-## Стек
-| Слой | Чем сделано |
+`~/.local/share/opencode-memory-rag/<project>.db` — one database per project. `MEMRAG_HOME` / `MEMRAG_DIR` override the location.
+
+## Stack
+
+| Layer | How it works |
 |---|---|
-| Индексация | обход проекта, чанки ≤800 символов, mtime-инкремент |
-| Retrieval | FTS5 `bm25()` + snippet, ноты с приоритетом (×1.6 + pinned) |
-| Граф | рекурсивный CTE BFS (глубина ≤2), симметричные рёбра |
-| Мозги | веса узлов (доступ повышает, min(w+δ,20)), brain-сводка |
-| Автоматика | plugin: session.created → index; idle → auto-note; compacting → инжект |
+| Indexing | walks the project, chunks <= 800 chars, incremental by mtime |
+| Retrieval | FTS5 `bm25()` + snippet, notes ranked higher (x1.6 + pinned) |
+| Graph | recursive-CTE BFS (depth <= 2), symmetric edges |
+| Brains | node weights (access raises, `min(w+delta, 20)`), `brain` summary |
+| Automation | plugin: session.created -> index; idle -> auto-note; compacting -> inject |
