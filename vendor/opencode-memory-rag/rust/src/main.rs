@@ -145,7 +145,9 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 fn open_db(dir: &Path) -> Result<Connection> {
     fs::create_dir_all(data_home())?;
     let conn = Connection::open(db_path_for(dir))?;
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    let _ = conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=15000;",
+    );
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
@@ -177,6 +179,15 @@ const SKIP_DIRS: &[&str] = &[
     ".termux",
     ".snapshot",
     ".recluse",
+    // macOS-мусор домашнего каталога: не текстовые проекты, а кеши/бинарники/iCloud
+    "Library",
+    ".Trash",
+    "Applications",
+    "Pictures",
+    "Music",
+    "Movies",
+    "Public",
+    "Downloads",
 ];
 const SKIP_FILES: &[&str] = &[".DS_Store", "CHANGELOG.tmp"];
 const MAX_FILE_SIZE: u64 = 400_000;
@@ -441,13 +452,21 @@ fn index_project(dir: &Path, force: bool) -> Result<String> {
     }
     conn.execute_batch("BEGIN")?;
     let mut in_txn = true;
+    // кешированные prepared statements: иначе каждый чанк = 2 свежих SQL-парсинга
+    let mut sel_file = conn
+        .prepare_cached("SELECT mtime,size,nchunks FROM files WHERE path=?")?;
+    let mut ins_doc = conn
+        .prepare_cached("INSERT INTO docs(kind,ref,idx,title,body) VALUES('chunk',?,?,?,?)")?;
+    let mut ins_cid = conn.prepare_cached("INSERT INTO chunk_ids(ref,rid) VALUES(?,?)")?;
+    let mut up_file = conn.prepare_cached("INSERT INTO files(path,mtime,size,nchunks) VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,size=excluded.size,nchunks=excluded.nchunks")?;
+    let mut del_by_rid = conn.prepare_cached(
+        "DELETE FROM docs WHERE rowid IN (SELECT rid FROM chunk_ids WHERE ref=?)",
+    )?;
+    let mut del_cid = conn.prepare_cached("DELETE FROM chunk_ids WHERE ref=?")?;
+    let mut del_doc = conn.prepare_cached("DELETE FROM docs WHERE kind='chunk' AND ref=?")?;
     for f in &found {
-        let old: Option<(i64, i64, i64)> = conn
-            .query_row(
-                "SELECT mtime,size,nchunks FROM files WHERE path=?",
-                [&f.file],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
+        let old: Option<(i64, i64, i64)> = sel_file
+            .query_row([&f.file], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .ok();
         if let Some((m, s, _)) = old {
             if !force && m.to_string() == f.mtime_ms.to_string() && s as u64 == f.size {
@@ -466,38 +485,27 @@ fn index_project(dir: &Path, force: bool) -> Result<String> {
             if let Some((_, _, nch)) = old {
                 chunks_removed += nch as usize;
                 // прежние чанки сносим по карте rowid (индекс по ref); легаси-строки node-версии — редким full-scan'ом
-                let mapped: i64 = conn.query_row(
-                    "SELECT count(*) FROM chunk_ids WHERE ref=?",
-                    [&f.file],
-                    |r| r.get(0),
-                )?;
-                if mapped > 0 {
-                    conn.execute(
-                        "DELETE FROM docs WHERE rowid IN (SELECT rid FROM chunk_ids WHERE ref=?)",
-                        [&f.file],
-                    )?;
-                    conn.execute("DELETE FROM chunk_ids WHERE ref=?", [&f.file])?;
-                } else if nch > 0 {
-                    conn.execute("DELETE FROM docs WHERE kind='chunk' AND ref=?", [&f.file])?;
+                let mapped = del_by_rid.execute([&f.file]).unwrap_or(0);
+                del_cid.execute([&f.file])?;
+                if mapped == 0 && nch > 0 {
+                    del_doc.execute([&f.file])?;
                 }
             }
             for (i, c) in chunks.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO docs(kind,ref,idx,title,body) VALUES('chunk',?,?,?,?)",
-                    rusqlite::params![
-                        f.file,
-                        i.to_string(),
-                        format!("{}:{}-{}", f.file, c.start, c.end),
-                        c.body
-                    ],
-                )?;
-                conn.execute(
-                    "INSERT INTO chunk_ids(ref,rid) VALUES(?,?)",
-                    rusqlite::params![f.file, conn.last_insert_rowid()],
-                )?;
+                ins_doc.execute(rusqlite::params![
+                    f.file,
+                    i.to_string(),
+                    format!("{}:{}-{}", f.file, c.start, c.end),
+                    c.body
+                ])?;
+                ins_cid.execute(rusqlite::params![f.file, conn.last_insert_rowid()])?;
             }
-            conn.execute("INSERT INTO files(path,mtime,size,nchunks) VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,size=excluded.size,nchunks=excluded.nchunks",
-                rusqlite::params![f.file, f.mtime_ms as i64, f.size as i64, chunks.len() as i64])?;
+            up_file.execute(rusqlite::params![
+                f.file,
+                f.mtime_ms as i64,
+                f.size as i64,
+                chunks.len() as i64
+            ])?;
             Ok(())
         })();
         match res {
@@ -523,7 +531,10 @@ fn index_project(dir: &Path, force: bool) -> Result<String> {
     }
     if in_txn {
         conn.execute_batch("COMMIT")?;
+        in_txn = false;
     }
+    // сбрасываем WAL сразу после основной массы — не тянем 30+ МБ между сессиями
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
 
     let known: Vec<String> = {
         let mut st = conn.prepare("SELECT path FROM files")?;
